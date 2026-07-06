@@ -9,14 +9,12 @@ Works with the Nexia family (CS / PM / SP / VC / TC) and Audia (FLOW, …). Pure
 ## Install
 
 ```bash
-# from GitHub (works today):
-pip install git+https://github.com/biamp-ntp/biamp-ntp
+pip install biamp-ntp
 
-# or from a local checkout:
+# or straight from GitHub / a local checkout:
+pip install git+https://github.com/biamp-ntp/biamp-ntp
 pip install -e .
 ```
-
-> The short form `pip install biamp-ntp` will work once it's published to PyPI.
 
 ## CLI
 
