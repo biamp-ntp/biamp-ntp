@@ -16,19 +16,44 @@ class BiampError(Exception):
 
 
 def _strip_iac(b):
-    """Remove telnet IAC negotiation triples (0xFF cmd opt) from a raw buffer.
+    """Remove telnet IAC sequences from a raw buffer.
 
-    The Nexia/Audia telnet server emits IAC negotiation on connect and can
-    interleave it with replies; left in, it corrupts parsing.
+    Handles the full grammar, not just 3-byte triples:
+
+    - ``IAC IAC``            -> escaped literal 0xFF data byte (kept)
+    - ``IAC SB ... IAC SE``  -> subnegotiation block (skipped whole)
+    - ``IAC WILL/WONT/DO/DONT <opt>`` -> 3-byte triple (skipped)
+    - ``IAC <cmd>``          -> other 2-byte command, e.g. NOP/GA (skipped)
+
+    A sequence left incomplete at the tail stops processing there; callers
+    re-strip the whole buffer after every recv(), so it completes on the
+    next pass instead of being miscounted.
     """
     out = bytearray()
     i, n = 0, len(b)
     while i < n:
-        if b[i] == 0xFF:
-            i += 3            # skip IAC + command byte + option byte
+        c = b[i]
+        if c != 0xFF:
+            out.append(c)
+            i += 1
             continue
-        out.append(b[i])
-        i += 1
+        if i + 1 >= n:
+            break                       # partial IAC at tail; wait for more
+        cmd = b[i + 1]
+        if cmd == 0xFF:                 # IAC IAC -> literal 0xFF
+            out.append(0xFF)
+            i += 2
+        elif cmd == 0xFA:               # SB ... IAC SE
+            j = b.find(b"\xff\xf0", i + 2)
+            if j < 0:
+                break                   # incomplete subnegotiation; wait
+            i = j + 2
+        elif 0xFB <= cmd <= 0xFE:       # WILL/WONT/DO/DONT <option>
+            if i + 2 >= n:
+                break                   # partial triple; wait
+            i += 3
+        else:                           # 2-byte command (NOP, GA, ...)
+            i += 2
     return bytes(out)
 
 
@@ -68,13 +93,21 @@ class BiampNTP:
     server is happiest with one client at a time.
     """
 
-    def __init__(self, host, device=1, port=23, timeout=3.0, settle=0.25):
+    def __init__(self, host, device=1, port=23, timeout=3.0, settle=0.25,
+                 pace=0.05):
         self.host = host
         self.device = device
         self.port = port
         self.timeout = timeout
         self.settle = settle
+        # Minimum gap between commands on one connection. The device chokes on
+        # full-rate pipelining: it emits an extra "-ERR:# 0x16" line per
+        # command and falls progressively behind (observed on a Nexia PM).
+        # 50 ms keeps it comfortably below that threshold; set pace=0 at your
+        # own risk on firmware you've verified.
+        self.pace = pace
         self._sock = None
+        self._next_send = 0.0
         self._lock = threading.Lock()
 
     # -- connection ------------------------------------------------------
@@ -94,6 +127,7 @@ class BiampNTP:
                 self._sock.close()
             finally:
                 self._sock = None
+                self._next_send = 0.0  # fresh connection re-drains the banner anyway
 
     def __enter__(self):
         return self.connect()
@@ -104,11 +138,10 @@ class BiampNTP:
     # -- framing ---------------------------------------------------------
 
     def _drain(self):
-        """Read the whole reply frame: settle briefly, then mop up non-blocking.
+        """Swallow the connect banner + IAC negotiation (connect time only).
 
-        The device dribbles its reply just after echoing the command, so a
-        single immediate recv() catches a partial frame (and splits IAC
-        triples). A short settle plus a brief non-blocking drain gets it whole.
+        Settle briefly, then read non-blocking until quiet. Only used once
+        per connection, so the small fixed cost doesn't affect command rate.
         """
         time.sleep(self.settle)
         chunks = bytearray()
@@ -123,11 +156,76 @@ class BiampNTP:
                 break
         return bytes(chunks)
 
-    def _reply(self, raw):
-        """Extract the reply string: strip IAC, take the last non-empty line."""
-        lines = [l for l in _strip_iac(raw).replace(b"\r", b"").split(b"\n")
-                 if l.strip()]
-        return lines[-1].decode("latin-1", "replace").strip() if lines else ""
+    @staticmethod
+    def _complete_lines(buf, sent):
+        """All complete, non-empty, non-echo lines in ``buf`` (bytes).
+
+        Strips IAC and splits on newlines; the unterminated tail is ignored.
+        Re-run on the whole buffer after every recv(), so IAC sequences and
+        lines split across TCP segments reassemble correctly.
+        """
+        text = _strip_iac(bytes(buf)).replace(b"\r", b"")
+        out = []
+        for line in text.split(b"\n")[:-1]:  # [-1] is an incomplete tail
+            s = line.decode("latin-1", "replace").strip()
+            if s and s != sent:
+                out.append(s)
+        return out
+
+    @staticmethod
+    def _extract_reply(buf, sent):
+        """Return the first reply line in ``buf``, or None if not yet complete."""
+        lines = BiampNTP._complete_lines(buf, sent)
+        return lines[0] if lines else None
+
+    def _flush_pending(self):
+        """Discard any unread stragglers from earlier exchanges (non-blocking).
+
+        A prior command can leave trailing bytes on the wire (e.g. a late
+        "-ERR:# 0x16" complaint); consumed here so they can't be misread as
+        the next command's reply.
+        """
+        self._sock.settimeout(0.0)
+        try:
+            while self._sock.recv(4096):
+                pass
+        except (BlockingIOError, socket.timeout, OSError):
+            pass
+
+    def _read_reply(self, sent):
+        """Read until a complete reply line arrives; return it ('' on timeout).
+
+        The device echoes the command (telnet echo is on by default), then
+        sends the reply terminated by CR/LF (`+OK`, `-ERR:...`, or a value).
+        Returns as soon as that line is complete -- command rate is bounded
+        by device RTT plus the small ``pace`` gap, not a fixed settle window.
+
+        A "-ERR:# 0x..." line is the device complaining about command timing,
+        normally followed by the real reply -- prefer the following line, but
+        if nothing else arrives before ``timeout`` return the complaint itself
+        so a genuine error is never swallowed. '' means the connection dropped
+        or no reply completed within ``timeout``.
+        """
+        deadline = time.monotonic() + self.timeout
+        buf = bytearray()
+        busy = None
+        while True:
+            for s in self._complete_lines(buf, sent):
+                if s.startswith("-ERR:#"):
+                    busy = s          # timing complaint; real reply usually follows
+                    continue
+                return s
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return busy or ""
+            self._sock.settimeout(remaining)
+            try:
+                b = self._sock.recv(4096)
+            except socket.timeout:
+                return busy or ""
+            if not b:
+                return busy or ""
+            buf += b
 
     # -- I/O -------------------------------------------------------------
 
@@ -142,9 +240,14 @@ class BiampNTP:
             for attempt in (1, 2):
                 try:
                     self.connect()
+                    wait = self._next_send - time.monotonic()
+                    if wait > 0:
+                        time.sleep(wait)  # pace: keep the device below its choke rate
+                    self._flush_pending()
                     self._sock.settimeout(self.timeout)
                     self._sock.sendall((text + "\n").encode())
-                    last = self._reply(self._drain())
+                    last = self._read_reply(text.strip())
+                    self._next_send = time.monotonic() + self.pace
                     if last or not retry:
                         return last
                     self.close()          # empty reply -> likely dropped; retry
@@ -198,3 +301,30 @@ class BiampNTP:
         if not r or r.startswith("-ERR"):
             raise BiampError("GET 0 DEVID -> %r" % r)
         return int(r)
+
+    def recall_preset(self, preset):
+        """RECALL a preset by number. Presets are system-wide (device 0)."""
+        r = self.command("RECALL 0 PRESET %d" % int(preset))
+        if r != "+OK":
+            raise BiampError("RECALL PRESET %s -> %r" % (preset, r))
+        return True
+
+    def _adjust(self, verb, attr, inst, idx_and_amount):
+        if not idx_and_amount:
+            raise TypeError("%s() needs at least an amount" % verb.lower())
+        idx, amount = idx_and_amount[:-1], idx_and_amount[-1]
+        parts = [verb, str(self.device), attr, str(inst)]
+        parts += [str(i) for i in idx] + [_fmt(amount)]
+        r = self.command(" ".join(parts))
+        if r != "+OK":
+            raise BiampError("%s %s %s %s %s -> %r"
+                             % (verb, attr, inst, list(idx), amount, r))
+        return True
+
+    def inc(self, attr, inst, *idx_and_amount):
+        """INC an attribute by an amount (last positional). Returns True on +OK."""
+        return self._adjust("INC", attr, inst, idx_and_amount)
+
+    def dec(self, attr, inst, *idx_and_amount):
+        """DEC an attribute by an amount (last positional). Returns True on +OK."""
+        return self._adjust("DEC", attr, inst, idx_and_amount)

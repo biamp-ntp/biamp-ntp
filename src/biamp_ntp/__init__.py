@@ -4,4 +4,4 @@ from .client import BiampError, BiampNTP
 from .scan import scan
 
 __all__ = ["BiampNTP", "BiampError", "scan", "protocol"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

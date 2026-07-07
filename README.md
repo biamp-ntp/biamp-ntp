@@ -4,6 +4,8 @@ A tiny, **dependency-free** Python client and CLI for the **Biamp Nexia / Audia 
 
 Works with the Nexia family (CS / PM / SP / VC / TC) and Audia (FLOW, …). Pure standard library, so it runs anywhere Python does — macOS, Linux, a Raspberry Pi, inside Home Assistant, wherever. No vendor software or Windows box needed for day-to-day control.
 
+**Scope:** telnet transport only (TCP port 23). The same NTP/ATP grammar also runs over RS-232, but this library doesn't drive serial ports — put the device on the network or use a serial-to-TCP bridge.
+
 > Extracted and generalized from a working Nexia PM sub-controller. The fiddly parts — telnet IAC stripping, reply framing, and the instance-ID drift problem — are already solved here.
 
 ## Install
@@ -31,6 +33,11 @@ biamp-ntp --host 192.168.1.199 get OUTLVLPM 8 5        # output block inst 8, ch
 biamp-ntp --host 192.168.1.199 set OUTLVLPM 8 5 -6.0   # set ch 5 to -6 dB
 biamp-ntp --host 192.168.1.199 set OUTMUTEPM 8 5 1     # mute ch 5
 
+# recall a preset (system-wide) and nudge levels
+biamp-ntp --host 192.168.1.199 recall 1001
+biamp-ntp --host 192.168.1.199 inc OUTLVLPM 8 5 2       # +2 dB
+biamp-ntp --host 192.168.1.199 dec OUTLVLPM 8 5 2       # -2 dB
+
 # escape hatch: send any raw command line
 biamp-ntp --host 192.168.1.199 raw GET 0 DEVID
 ```
@@ -50,6 +57,8 @@ with BiampNTP("192.168.1.199") as dsp:
     level = dsp.get_float(p.OUTPUT_LEVEL_PM, 8, 5)   # ch 5 level, dB
     dsp.set(p.OUTPUT_LEVEL_PM, 8, 5, -6.0)           # set ch 5 to -6 dB
     dsp.set(p.OUTPUT_MUTE_PM, 8, 5, True)            # mute (bool -> 1)
+    dsp.inc(p.OUTPUT_LEVEL_PM, 8, 5, 2)              # nudge ch 5 up 2 dB
+    dsp.recall_preset(1001)                          # system-wide preset
 ```
 
 `command()` is thread-safe and reconnects automatically if the socket drops.
@@ -83,7 +92,7 @@ Levels are dB; mute/invert are `0`/`1`. Crosspoints (`MMLVLXP`/`MMMUTEXP`) take 
 
 - **Grammar:** `GET <dev> <ATTR> <inst> <idx...>` → value; `SET <dev> <ATTR> <inst> <idx...> <value>` → `+OK`. Errors: `-ERR:SYNTAX`, `-ERR:XACTION ERROR`.
 - **Telnet IAC:** the server sends IAC negotiation bytes on connect and can interleave them with replies — this library strips them.
-- **Reply timing:** replies dribble out just after the command echo; a single immediate `recv()` catches a partial frame. The client settles briefly then drains fully (tunable via `settle=`).
+- **Reply timing:** replies dribble out just after the command echo, so a single immediate `recv()` catches a partial frame. The client reads until a complete reply line (`+OK`, `-ERR:...`, or a value) arrives, then paces the next command by `pace=` (default 50 ms). Don't set `pace=0` blindly: at full rate a real Nexia prepends an undocumented `-ERR:# 0x16` complaint to each reply and falls behind. The client treats `-ERR:#` lines as timing complaints (prefers the line that follows, returns the complaint only if nothing else arrives). `settle=` only paces the one-off banner drain at connect.
 - **One client at a time:** the telnet server is happiest single-threaded; `command()` serializes on a lock.
 
 ## Development

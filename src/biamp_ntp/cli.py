@@ -51,6 +51,16 @@ def build_parser():
     sp.add_argument("inst", type=int)
     sp.add_argument("args", nargs="+", metavar="idx...-value")
 
+    sp = sub.add_parser("recall", help="RECALL a preset (system-wide, device 0)")
+    sp.add_argument("preset", type=int, help="preset number, e.g. 1001")
+
+    for verb in ("inc", "dec"):
+        sp = sub.add_parser(verb, help="%s an attribute (last arg is the amount)"
+                            % verb.upper())
+        sp.add_argument("attr")
+        sp.add_argument("inst", type=int)
+        sp.add_argument("args", nargs="+", metavar="idx...-amount")
+
     sp = sub.add_parser("raw", help="send a raw command line and print the reply")
     sp.add_argument("line", nargs=argparse.REMAINDER)
 
@@ -78,6 +88,14 @@ def main(argv=None):
             elif args.cmd == "set":
                 idx, value = args.args[:-1], args.args[-1]
                 dsp.set(args.attr, args.inst, *[int(i) for i in idx], value)
+                print("+OK")
+            elif args.cmd == "recall":
+                dsp.recall_preset(args.preset)
+                print("+OK")
+            elif args.cmd in ("inc", "dec"):
+                idx, amount = args.args[:-1], args.args[-1]
+                fn = dsp.inc if args.cmd == "inc" else dsp.dec
+                fn(args.attr, args.inst, *[int(i) for i in idx], amount)
                 print("+OK")
             elif args.cmd == "raw":
                 print(dsp.command(" ".join(args.line)))

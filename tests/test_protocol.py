@@ -15,6 +15,25 @@ class StripIAC(unittest.TestCase):
     def test_no_iac(self):
         self.assertEqual(_strip_iac(b"-3.00\r\n"), b"-3.00\r\n")
 
+    def test_escaped_literal_ff(self):
+        # IAC IAC is an escaped 0xFF data byte, not a command
+        self.assertEqual(_strip_iac(b"a\xff\xffb"), b"a\xffb")
+
+    def test_subnegotiation_skipped_whole(self):
+        # IAC SB TTYPE ... IAC SE is longer than a triple
+        raw = b"\xff\xfa\x18\x01payload\xff\xf0+OK\r\n"
+        self.assertEqual(_strip_iac(raw), b"+OK\r\n")
+
+    def test_two_byte_command(self):
+        # IAC NOP (0xFF 0xF1) is a 2-byte command
+        self.assertEqual(_strip_iac(b"\xff\xf1+OK\r\n"), b"+OK\r\n")
+
+    def test_partial_tail_waits(self):
+        # incomplete sequences at the tail must not consume following bytes
+        self.assertEqual(_strip_iac(b"+OK\r\n\xff"), b"+OK\r\n")
+        self.assertEqual(_strip_iac(b"+OK\r\n\xff\xfb"), b"+OK\r\n")
+        self.assertEqual(_strip_iac(b"+OK\r\n\xff\xfa\x18"), b"+OK\r\n")
+
 
 class Fmt(unittest.TestCase):
     def test_bool(self):
@@ -32,22 +51,32 @@ class Fmt(unittest.TestCase):
         self.assertEqual(_fmt("on"), "on")
 
 
-class Reply(unittest.TestCase):
-    def setUp(self):
-        self.c = BiampNTP("test.invalid")  # no connection is opened
+class ExtractReply(unittest.TestCase):
+    x = staticmethod(BiampNTP._extract_reply)
 
-    def test_strips_iac_and_takes_last_line(self):
-        self.assertEqual(self.c._reply(b"\xff\xfb\x01-3.00\r\n"), "-3.00")
+    def test_strips_iac(self):
+        self.assertEqual(self.x(b"\xff\xfb\x01-3.00\r\n", ""), "-3.00")
 
-    def test_echo_then_value(self):
-        raw = b"GET 1 OUTLVLPM 8 5\r\n-3.00\r\n"
-        self.assertEqual(self.c._reply(raw), "-3.00")
+    def test_skips_echo_takes_value(self):
+        sent = "GET 1 OUTLVLPM 8 5"
+        raw = b"GET 1 OUTLVLPM 8 5\r\n-3.00 \r\n"
+        self.assertEqual(self.x(raw, sent), "-3.00")
 
-    def test_ok(self):
-        self.assertEqual(self.c._reply(b"SET 1 OUTLVLPM 8 5 -3.00\r\n+OK\r\n"), "+OK")
+    def test_ok_after_echo(self):
+        sent = "SET 1 OUTLVLPM 8 5 -3.00"
+        raw = b"SET 1 OUTLVLPM 8 5 -3.00\r\n+OK\r\n"
+        self.assertEqual(self.x(raw, sent), "+OK")
 
-    def test_empty(self):
-        self.assertEqual(self.c._reply(b"\xff\xfb\x01"), "")
+    def test_incomplete_returns_none(self):
+        sent = "GET 1 OUTLVLPM 8 5"
+        # echo complete, value line not yet terminated
+        self.assertIsNone(self.x(b"GET 1 OUTLVLPM 8 5\r\n-3.0", sent))
+        # bare IAC negotiation only
+        self.assertIsNone(self.x(b"\xff\xfb\x01", sent))
+
+    def test_iac_split_reassembles(self):
+        # trailing partial IAC triple must not corrupt an earlier line
+        self.assertEqual(self.x(b"+OK\r\n\xff", ""), "+OK")
 
 
 if __name__ == "__main__":
