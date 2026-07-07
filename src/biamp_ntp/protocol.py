@@ -37,3 +37,4 @@ FADER_MUTE = "FDRMUTE"           # idx = channel
 
 # --- Device -----------------------------------------------------------------
 DEVICE_ID = "DEVID"              # GET 0 DEVID -> device number
+PRESET = "PRESET"                # RECALL 0 PRESET <n> (system-wide; see BiampNTP.recall_preset)
