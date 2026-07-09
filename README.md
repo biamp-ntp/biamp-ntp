@@ -14,7 +14,7 @@ Works with the Nexia family (CS / PM / SP / VC / TC) and Audia (FLOW, …). Pure
 pip install biamp-ntp
 
 # or straight from GitHub / a local checkout:
-pip install git+https://github.com/biamp-ntp/biamp-ntp
+pip install git+https://github.com/av-dsp-tools/biamp-ntp
 pip install -e .
 ```
 
@@ -94,6 +94,10 @@ Levels are dB; mute/invert are `0`/`1`. Crosspoints (`MMLVLXP`/`MMMUTEXP`) take 
 - **Telnet IAC:** the server sends IAC negotiation bytes on connect and can interleave them with replies — this library strips them.
 - **Reply timing:** replies dribble out just after the command echo, so a single immediate `recv()` catches a partial frame. The client reads until a complete reply line (`+OK`, `-ERR:...`, or a value) arrives, then paces the next command by `pace=` (default 50 ms). Don't set `pace=0` blindly: at full rate a real Nexia prepends an undocumented `-ERR:# 0x16` complaint to each reply and falls behind. The client treats `-ERR:#` lines as timing complaints (prefers the line that follows, returns the complaint only if nothing else arrives). `settle=` only paces the one-off banner drain at connect.
 - **One client at a time:** the telnet server is happiest single-threaded; `command()` serializes on a lock.
+
+## See also
+
+- [minidsp-dash](https://github.com/av-dsp-tools/minidsp-dash) — sibling project: a phone-friendly web remote for miniDSP devices
 
 ## Development
 

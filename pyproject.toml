@@ -23,8 +23,8 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/biamp-ntp/biamp-ntp"
-Issues = "https://github.com/biamp-ntp/biamp-ntp/issues"
+Homepage = "https://github.com/av-dsp-tools/biamp-ntp"
+Issues = "https://github.com/av-dsp-tools/biamp-ntp/issues"
 
 [project.scripts]
 biamp-ntp = "biamp_ntp.cli:main"
