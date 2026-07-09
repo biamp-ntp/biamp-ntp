@@ -1,4 +1,4 @@
-# biamp-ntp
+# av-dsp-tools
 
 A tiny, **dependency-free** Python client and CLI for the **Biamp Nexia / Audia Text Protocol** — the line-based control protocol those DSPs expose over telnet (TCP port 23, no authentication).
 
