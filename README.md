@@ -91,6 +91,7 @@ Levels are dB; mute/invert are `0`/`1`. Crosspoints (`MMLVLXP`/`MMMUTEXP`) take 
 ## Protocol notes (the gotchas)
 
 - **Grammar:** `GET <dev> <ATTR> <inst> <idx...>` → value; `SET <dev> <ATTR> <inst> <idx...> <value>` → `+OK`. Errors: `-ERR:SYNTAX`, `-ERR:XACTION ERROR`.
+- **`XACTION ERROR` is overloaded:** it means "instance/index doesn't resolve" *and* "value outside the block's configured range". A level block whose design caps it at 0 dB rejects `SET ... 3.0` with the same error a nonexistent instance gives — if SETs fail on an instance that GETs fine, suspect the value range (set in the design software), not your addressing.
 - **Telnet IAC:** the server sends IAC negotiation bytes on connect and can interleave them with replies — this library strips them.
 - **Reply timing:** replies dribble out just after the command echo, so a single immediate `recv()` catches a partial frame. The client reads until a complete reply line (`+OK`, `-ERR:...`, or a value) arrives, then paces the next command by `pace=` (default 50 ms). Don't set `pace=0` blindly: at full rate a real Nexia prepends an undocumented `-ERR:# 0x16` complaint to each reply and falls behind. The client treats `-ERR:#` lines as timing complaints (prefers the line that follows, returns the complaint only if nothing else arrives). `settle=` only paces the one-off banner drain at connect.
 - **One client at a time:** the telnet server is happiest single-threaded; `command()` serializes on a lock.
